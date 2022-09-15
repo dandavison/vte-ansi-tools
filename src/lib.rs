@@ -361,6 +361,18 @@ mod tests {
             strip_osc_codes(COLORED_HYPERLINK),
             "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\n"
         );
+        assert_eq!(
+            strip_osc_codes(&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK)),
+            "This is a linkThis is a link"
+        );
+        assert_eq!(
+            strip_osc_codes(&format!(
+                "{}{}",
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap()
+            )),
+            "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m"
+        )
     }
 
     #[test]
