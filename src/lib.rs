@@ -283,6 +283,14 @@ mod tests {
             ("バー", Some(("", "バー", ""))),
             ("\x1b[31mバー\x1b[0m", Some(("", "\x1b[31mバー\x1b[0m", ""))),
             (
+                SIMPLE_HYPERLINK,
+                Some((
+                    "\x1b]8;;http://example.com\x1b\\",
+                    "This is a link",
+                    "\x1b]8;;\x1b\\",
+                )),
+            ),
+            (
                 COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
                 Some((
                     "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\",
@@ -305,6 +313,15 @@ mod tests {
                     "\x1b[38;5;4msrc[0m/ansi/mod.rs",
                     "\x1b]8;;\x1b\\\x1b[0m",
                 )),
+            ),
+            (&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK), None),
+            (
+                &format!(
+                    "{}{}",
+                    COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                    COLORED_HYPERLINK.strip_suffix("\n").unwrap()
+                ),
+                None,
             ),
         ] {
             assert_eq!(osc_partition(input), expected)
