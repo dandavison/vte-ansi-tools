@@ -15,8 +15,94 @@ pub const ANSI_CSI_CLEAR_TO_BOL: &str = "\x1b[1K";
 pub const ANSI_SGR_RESET: &str = "\x1b[0m";
 pub const ANSI_SGR_REVERSE: &str = "\x1b[7m";
 
+// Return the text component of `s`, i.e. with all ANSI codes removed. In this library, the term
+// "ANSI codes" means any bytes that belong to CSI, OSC, SGR or escape sequence constructs and are
+// not part of the text that will be displayed to the user. For example, "ANSI codes" includes color
+// escape sequences, OSC8 sequences that are used for terminal hyperlinks, and also the URI part of
+// a terminal hyperlink. See https://en.wikipedia.org/wiki/ANSI_escape_code.
 pub fn strip_ansi_codes(s: &str) -> String {
     strip_ansi_codes_from_strings_iterator(ansi_strings_iterator(s))
+}
+
+enum OscPartitionState {
+    BeforeText(Option<usize>),
+    InText,
+    AfterText,
+}
+
+/// If `s` is of the form
+/// '<non-text-ansi-prefix><text-with-non-osc-ansi-codes><non-text-ansi-suffix>' then return
+/// `Some((ansi_prefix, text_with_non_osc_ansi_codes, ansi_suffix))`, otherwise return None. Any of
+/// the 3 substrings may be empty. If `s` contains no text, then return `Some(("", "", s))`. If `s`
+/// contains more than one text section, then return None. The second element of the returned
+/// structure (`text_with_non_osc_ansi_codes`) greedily captures non-OSC ANSI content before and
+/// after it. This function can be used to extract a hyperlink when the link text itself is colored.
+pub fn osc_partition(s: &str) -> Option<(&str, &str, &str)> {
+    use OscPartitionState::*;
+    let mut state = BeforeText(Some(0));
+    let (mut text_start, mut text_end) = (0, 0);
+    for el in AnsiElementIterator::new(s) {
+        match el {
+            Element::Text(i, j) => {
+                match state {
+                    BeforeText(last_non_osc_start) => {
+                        state = InText;
+                        text_start = last_non_osc_start.unwrap_or(i);
+                    }
+                    InText => {}
+                    AfterText => return None,
+                }
+                text_end = j;
+            }
+            Element::Sgr(_, i, j) => match state {
+                BeforeText(None) => {
+                    // Start accumulating some non-OSC content to potentially be prepended to the
+                    // returned text section.
+                    state = BeforeText(Some(i))
+                }
+                InText => {
+                    // Extend the end of the text so that adjacent non-OSC content is appended to
+                    // the returned text section.
+                    text_end = j;
+                }
+                _ => {}
+            },
+            Element::Csi(i, j) => match state {
+                BeforeText(None) => state = BeforeText(Some(i)),
+                InText => text_end = j,
+                _ => {}
+            },
+            Element::Osc(i, _j) => match state {
+                BeforeText(Some(_)) => {
+                    // We had accumulated some non-OSC/ESC content to potentially be prepended to
+                    // the returned text section, but in fact it must not be, because there is
+                    // intervening OSC/ESC content.
+                    state = BeforeText(None);
+                }
+                InText => {
+                    // OSC/ESC marks the end of the text section.
+                    text_end = i;
+                    state = AfterText;
+                }
+                _ => {}
+            },
+            Element::Esc(i, _j) => match state {
+                BeforeText(Some(_)) => {
+                    // We had accumulated some non-OSC/ESC content to potentially be prepended to
+                    // the returned text section, but in fact it must not be, because there is
+                    // intervening OSC/ESC content.
+                    state = BeforeText(None);
+                }
+                InText => {
+                    // OSC/ESC marks the end of the text section.
+                    text_end = i;
+                    state = AfterText;
+                }
+                _ => {}
+            },
+        }
+    }
+    Some((&s[..text_start], &s[text_start..text_end], &s[text_end..]))
 }
 
 pub fn measure_text_width(s: &str) -> usize {
@@ -176,6 +262,7 @@ mod tests {
     use super::*;
 
     const COLORED_HYPERLINK: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
+    const COLORED_HYPERLINK_WITH_COLORED_FIRST_CHAR_OF_TEXT: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\\x1b[38;5;4msrc[0m/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
 
     #[test]
     fn test_strip_ansi_codes() {
@@ -183,6 +270,44 @@ mod tests {
             assert_eq!(strip_ansi_codes(s), *s);
         }
         assert_eq!(strip_ansi_codes("\x1b[31mバー\x1b[0m"), "バー");
+    }
+
+    #[test]
+    fn test_osc_partition() {
+        for (input, expected) in [
+            ("", Some(("", "", ""))),
+            ("a", Some(("", "a", ""))),
+            ("ab", Some(("", "ab", ""))),
+            ("a\nb\n", Some(("", "a\nb\n", ""))),
+            ("バー", Some(("", "バー", ""))),
+            ("\x1b[31mバー\x1b[0m", Some(("", "\x1b[31mバー\x1b[0m", ""))),
+            (
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                Some((
+                    "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\",
+                    "src/ansi/mod.rs",
+                    "\x1b]8;;\x1b\\\x1b[0m",
+                )),
+            ),
+            (COLORED_HYPERLINK, None), // it has a trailing newline
+            ("\x1b[38;5;4m\x1b[0m", Some(("", "", "\x1b[38;5;4m\x1b[0m"))),
+            (
+                "\x1b[38;5;4m____\x1b[0m\x1b[38;5;4m____\x1b[0m",
+                Some(("", "\x1b[38;5;4m____\x1b[0m\x1b[38;5;4m____\x1b[0m", "")),
+            ),
+            (
+                COLORED_HYPERLINK_WITH_COLORED_FIRST_CHAR_OF_TEXT
+                    .strip_suffix("\n")
+                    .unwrap(),
+                Some((
+                    "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\",
+                    "\x1b[38;5;4msrc[0m/ansi/mod.rs",
+                    "\x1b]8;;\x1b\\\x1b[0m",
+                )),
+            ),
+        ] {
+            assert_eq!(osc_partition(input), expected)
+        }
     }
 
     #[test]
