@@ -261,6 +261,7 @@ mod tests {
     // Note that src/ansi/console_tests.rs contains additional test coverage for this module.
     use super::*;
 
+    const COLORED_NON_ASCII_TEXT: &str = "\x1b[31mバー\x1b[0m";
     const SIMPLE_HYPERLINK: &str = "\x1b]8;;http://example.com\x1b\\This is a link\x1b]8;;\x1b\\";
     const COLORED_HYPERLINK: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
     const COLORED_HYPERLINK_WITH_COLORED_FIRST_CHAR_OF_TEXT: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\\x1b[38;5;4msrc[0m/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
@@ -281,7 +282,26 @@ mod tests {
             ("ab", Some(("", "ab", ""))),
             ("a\nb\n", Some(("", "a\nb\n", ""))),
             ("バー", Some(("", "バー", ""))),
-            ("\x1b[31mバー\x1b[0m", Some(("", "\x1b[31mバー\x1b[0m", ""))),
+            (
+                COLORED_NON_ASCII_TEXT,
+                Some(("", COLORED_NON_ASCII_TEXT, "")),
+            ),
+            (
+                &format!("{}{}", COLORED_NON_ASCII_TEXT, COLORED_NON_ASCII_TEXT),
+                Some((
+                    "",
+                    &format!("{}{}", COLORED_NON_ASCII_TEXT, COLORED_NON_ASCII_TEXT),
+                    "",
+                )),
+            ),
+            (
+                SIMPLE_HYPERLINK,
+                Some((
+                    "\x1b]8;;http://example.com\x1b\\",
+                    "This is a link",
+                    "\x1b]8;;\x1b\\",
+                )),
+            ),
             (
                 COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
                 Some((
@@ -305,6 +325,19 @@ mod tests {
                     "\x1b[38;5;4msrc[0m/ansi/mod.rs",
                     "\x1b]8;;\x1b\\\x1b[0m",
                 )),
+            ),
+            (&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK), None),
+            (
+                &format!(
+                    "{}{}",
+                    COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                    COLORED_HYPERLINK.strip_suffix("\n").unwrap()
+                ),
+                None,
+            ),
+            (
+                &format!("text before {} text after", SIMPLE_HYPERLINK),
+                None,
             ),
         ] {
             assert_eq!(osc_partition(input), expected)
@@ -332,6 +365,18 @@ mod tests {
             strip_osc_codes(COLORED_HYPERLINK),
             "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\n"
         );
+        assert_eq!(
+            strip_osc_codes(&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK)),
+            "This is a linkThis is a link"
+        );
+        assert_eq!(
+            strip_osc_codes(&format!(
+                "{}{}",
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap()
+            )),
+            "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m"
+        )
     }
 
     #[test]
