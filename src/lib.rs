@@ -261,6 +261,7 @@ mod tests {
     // Note that src/ansi/console_tests.rs contains additional test coverage for this module.
     use super::*;
 
+    const SIMPLE_HYPERLINK: &str = "\x1b]8;;http://example.com\x1b\\This is a link\x1b]8;;\x1b\\";
     const COLORED_HYPERLINK: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
     const COLORED_HYPERLINK_WITH_COLORED_FIRST_CHAR_OF_TEXT: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\\x1b[38;5;4msrc[0m/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
 
@@ -321,10 +322,7 @@ mod tests {
 
     #[test]
     fn test_strip_ansi_codes_osc_hyperlink() {
-        assert_eq!(
-            strip_ansi_codes("\x1b]8;;http://example.com\x1b\\This is a link\x1b]8;;\x1b\\"),
-            "This is a link",
-        );
+        assert_eq!(strip_ansi_codes(SIMPLE_HYPERLINK), "This is a link",);
         assert_eq!(strip_ansi_codes(COLORED_HYPERLINK), "src/ansi/mod.rs\n");
     }
 
