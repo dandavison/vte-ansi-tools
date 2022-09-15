@@ -335,6 +335,10 @@ mod tests {
                 ),
                 None,
             ),
+            (
+                &format!("text before {} text after", SIMPLE_HYPERLINK),
+                None,
+            ),
         ] {
             assert_eq!(osc_partition(input), expected)
         }
