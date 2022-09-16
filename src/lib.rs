@@ -24,6 +24,38 @@ pub fn strip_ansi_codes(s: &str) -> String {
     strip_ansi_codes_from_strings_iterator(ansi_strings_iterator(s))
 }
 
+/// Return (Option<url>, stripped_string). All hyperlinks are removed from stripped string. The URL
+/// of the first hyperlink is returned, or None if there are no hyperlinks.
+pub fn extract_osc8_hyperlink(s: &str) -> (Option<String>, String) {
+    let mut osc_uri = None;
+    let mut seen_text = false;
+
+    let input_without_hyperlink = AnsiElementIterator::new(s)
+        .filter_map(|el| match el {
+            Element::Osc(i, j) => {
+                if !seen_text && osc_uri.is_none() {
+                    osc_uri = Some(&s[i..j]);
+                };
+                None
+            }
+            Element::Sgr(_, i, j) => Some(&s[i..j]),
+            Element::Csi(i, j) => Some(&s[i..j]),
+            Element::Esc(_, _) => None,
+            Element::Text(i, j) => {
+                seen_text = true;
+                Some(&s[i..j])
+            }
+        })
+        .join("");
+
+    let uri = osc_uri.and_then(|s| {
+        s.strip_prefix("\x1b]8;;")
+            .and_then(|s| s.strip_suffix("\x1b"))
+    });
+
+    (uri.map(String::from), input_without_hyperlink)
+}
+
 enum OscPartitionState {
     BeforeText(Option<usize>),
     InText,
@@ -272,6 +304,13 @@ mod tests {
             assert_eq!(strip_ansi_codes(s), *s);
         }
         assert_eq!(strip_ansi_codes("\x1b[31mバー\x1b[0m"), "バー");
+    }
+
+    #[test]
+    fn test_extract_osc8_hyperlink() {
+        assert_eq!(extract_osc8_hyperlink("\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n"),
+                  (Some("file:///Users/dan/src/delta/src/ansi/mod.rs".into()),
+                   "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\n".into()));
     }
 
     #[test]
