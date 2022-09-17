@@ -20,40 +20,67 @@ pub const ANSI_SGR_REVERSE: &str = "\x1b[7m";
 // not part of the text that will be displayed to the user. For example, "ANSI codes" includes color
 // escape sequences, OSC8 sequences that are used for terminal hyperlinks, and also the URI part of
 // a terminal hyperlink. See https://en.wikipedia.org/wiki/ANSI_escape_code.
-pub fn strip_ansi_codes(s: &str) -> String {
-    strip_ansi_codes_from_strings_iterator(ansi_strings_iterator(s))
+pub fn strip_ansi(s: &str) -> String {
+    strip_ansi_from_strings_iterator(ansi_strings_iterator(s))
 }
 
-/// Return (Option<url>, stripped_string). All hyperlinks are removed from stripped string. The URL
-/// of the first hyperlink is returned, or None if there are no hyperlinks.
-pub fn extract_osc8_hyperlink(s: &str) -> (Option<String>, String) {
-    let mut osc_uri = None;
-    let mut seen_text = false;
+enum ExtractOsc8HyperlinkState {
+    ExpectOsc8Url,
+    ExpectFirstText,
+    ExpectMoreTextOrTerminator,
+    SeenOneHyperlink,
+    WillNotReturnUrl,
+}
 
-    let input_without_hyperlink = AnsiElementIterator::new(s)
-        .filter_map(|el| match el {
-            Element::Osc(i, j) => {
-                if !seen_text && osc_uri.is_none() {
-                    osc_uri = Some(&s[i..j]);
-                };
-                None
-            }
-            Element::Sgr(_, i, j) => Some(&s[i..j]),
-            Element::Csi(i, j) => Some(&s[i..j]),
-            Element::Esc(_, _) => None,
+/// Strip OSC codes from `s`. If `s` is a single OSC8 hyperlink, with no other text, then return
+/// (s_with_all_hyperlinks_removed, Some(url)). If `s` does not meet this description, then return
+/// (s_with_all_hyperlinks_removed, None). Any ANSI color sequences in `s` will be retained. See
+/// https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
+pub fn strip_osc(s: &str) -> (String, Option<String>) {
+    use ExtractOsc8HyperlinkState::*;
+
+    let mut url = None;
+    let mut state = ExpectOsc8Url;
+    let mut text = String::with_capacity(s.len());
+
+    for el in AnsiElementIterator::new(s) {
+        match el {
+            Element::Osc(i, j) => match state {
+                ExpectOsc8Url => {
+                    url = Some(&s[i..j]);
+                    state = ExpectFirstText;
+                }
+                ExpectMoreTextOrTerminator => state = SeenOneHyperlink,
+                _ => state = WillNotReturnUrl,
+            },
+            Element::Sgr(_, i, j) => text.push_str(&s[i..j]),
+            Element::Csi(i, j) => text.push_str(&s[i..j]),
+            Element::Esc(_, _) => {}
             Element::Text(i, j) => {
-                seen_text = true;
-                Some(&s[i..j])
+                text.push_str(&s[i..j]);
+                match state {
+                    ExpectFirstText => state = ExpectMoreTextOrTerminator,
+                    ExpectMoreTextOrTerminator => {}
+                    _ => state = WillNotReturnUrl,
+                }
             }
-        })
-        .join("");
+        }
+    }
 
-    let uri = osc_uri.and_then(|s| {
-        s.strip_prefix("\x1b]8;;")
-            .and_then(|s| s.strip_suffix("\x1b"))
-    });
-
-    (uri.map(String::from), input_without_hyperlink)
+    match state {
+        WillNotReturnUrl => (text, None),
+        _ => {
+            let url = url.and_then(|s| {
+                s.strip_prefix("\x1b]8;;")
+                    .and_then(|s| s.strip_suffix("\x1b"))
+            });
+            if let Some(url) = url {
+                (text, Some(url.to_string()))
+            } else {
+                (text, None)
+            }
+        }
+    }
 }
 
 enum OscPartitionState {
@@ -139,20 +166,7 @@ pub fn osc_partition(s: &str) -> Option<(&str, &str, &str)> {
 
 pub fn measure_text_width(s: &str) -> usize {
     // TODO: how should e.g. '\n' be handled?
-    strip_ansi_codes(s).width()
-}
-
-/// Return string without OSC codes (e.g. without hyperlinks).
-pub fn strip_osc_codes(s: &str) -> String {
-    AnsiElementIterator::new(s)
-        .filter_map(|el| match el {
-            Element::Osc(_, _) => None,
-            Element::Sgr(_, i, j) => Some(&s[i..j]),
-            Element::Csi(i, j) => Some(&s[i..j]),
-            Element::Esc(_, _) => None,
-            Element::Text(i, j) => Some(&s[i..j]),
-        })
-        .join("")
+    strip_ansi(s).width()
 }
 
 /// Truncate string such that `tail` is present as a suffix, preceded by as much of `s` as can be
@@ -167,7 +181,7 @@ pub fn strip_osc_codes(s: &str) -> String {
 //    display_width of the result would exceed `display_width`.
 pub fn truncate_str<'a, 'b>(s: &'a str, display_width: usize, tail: &'b str) -> Cow<'a, str> {
     let items = ansi_strings_iterator(s).collect::<Vec<(&str, bool)>>();
-    let width = strip_ansi_codes_from_strings_iterator(items.iter().copied()).width();
+    let width = strip_ansi_from_strings_iterator(items.iter().copied()).width();
     if width <= display_width {
         return Cow::from(s);
     }
@@ -280,9 +294,7 @@ fn ansi_strings_iterator(s: &str) -> impl Iterator<Item = (&str, bool)> {
     })
 }
 
-fn strip_ansi_codes_from_strings_iterator<'a>(
-    strings: impl Iterator<Item = (&'a str, bool)>,
-) -> String {
+fn strip_ansi_from_strings_iterator<'a>(strings: impl Iterator<Item = (&'a str, bool)>) -> String {
     strings
         .filter_map(|(el, is_ansi)| if !is_ansi { Some(el) } else { None })
         .join("")
@@ -293,24 +305,123 @@ mod tests {
     // Note that src/ansi/console_tests.rs contains additional test coverage for this module.
     use super::*;
 
+    const HTTP_URL: &str = "http://example.com";
+    const HTTPS_URL: &str = "https://example.com/whatever?this=that&x=y";
+    const FILE_URL: &str = "file:///Users/dan/src/delta/src/ansi/mod.rs";
     const COLORED_NON_ASCII_TEXT: &str = "\x1b[31mバー\x1b[0m";
-    const SIMPLE_HYPERLINK: &str = "\x1b]8;;http://example.com\x1b\\This is a link\x1b]8;;\x1b\\";
     const COLORED_HYPERLINK: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
     const COLORED_HYPERLINK_WITH_COLORED_FIRST_CHAR_OF_TEXT: &str = "\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\\x1b[38;5;4msrc[0m/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n";
+    const MULTICOLORED_TEXT: &str =
+        "\x1b[30mfoo\x1b[0m\x1b[31mbar\x1b[0m\x1b[32mbaz\x1b[0m\x1b[33mqux\x1b[0m";
 
-    #[test]
-    fn test_strip_ansi_codes() {
-        for s in &["src/ansi/mod.rs", "バー", "src/ansi/modバー.rs"] {
-            assert_eq!(strip_ansi_codes(s), *s);
-        }
-        assert_eq!(strip_ansi_codes("\x1b[31mバー\x1b[0m"), "バー");
+    fn format_osc8_hyperlink(url: &str, text: &str) -> String {
+        format!(
+            "{osc}8;;{url}{st}{text}{osc}8;;{st}",
+            url = url,
+            text = text,
+            osc = "\x1b]",
+            st = "\x1b\\"
+        )
     }
 
     #[test]
-    fn test_extract_osc8_hyperlink() {
-        assert_eq!(extract_osc8_hyperlink("\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/mod.rs\x1b]8;;\x1b\\\x1b[0m\n"),
-                  (Some("file:///Users/dan/src/delta/src/ansi/mod.rs".into()),
-                   "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\n".into()));
+    fn test_strip_ansi() {
+        for s in &["src/ansi/mod.rs", "バー", "src/ansi/modバー.rs"] {
+            assert_eq!(strip_ansi(s), *s);
+        }
+        assert_eq!(strip_ansi("\x1b[31mバー\x1b[0m"), "バー");
+    }
+
+    #[test]
+    fn test_strip_osc() {
+        assert_eq!(
+            strip_osc(&format_osc8_hyperlink(HTTP_URL, "This is a link")),
+            ("This is a link".to_string(), Some(HTTP_URL.to_string()))
+        );
+        assert_eq!(
+            strip_osc(&format_osc8_hyperlink(HTTPS_URL, "This is a link")),
+            ("This is a link".to_string(), Some(HTTPS_URL.to_string()))
+        );
+        assert_eq!(
+            strip_osc(COLORED_HYPERLINK.strip_suffix("\n").unwrap()),
+            (
+                "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m".into(),
+                Some(FILE_URL.into())
+            )
+        );
+        assert_eq!(
+            strip_osc(&format_osc8_hyperlink(FILE_URL, MULTICOLORED_TEXT)),
+            (MULTICOLORED_TEXT.to_string(), Some(FILE_URL.to_string()))
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "{}{}",
+                format_osc8_hyperlink(HTTP_URL, "This is a link"),
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("This is a linkThis is a link".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "{}{}",
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
+                COLORED_HYPERLINK.strip_suffix("\n").unwrap()
+            )),
+            (
+                "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m".to_string(),
+                None
+            )
+        )
+    }
+
+    #[test]
+    fn test_strip_osc_invalid_input() {
+        assert_eq!(strip_osc(""), ("".to_string(), None));
+        assert_eq!(strip_osc("a"), ("a".to_string(), None));
+        assert_eq!(
+            strip_osc(&format!(
+                "{}X",
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("This is a linkX".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "{} ",
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("This is a link ".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "X{}",
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("XThis is a link".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                " {}",
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            (" This is a link".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "{}{}",
+                format_osc8_hyperlink(HTTP_URL, "This is a link"),
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("This is a linkThis is a link".to_string(), None)
+        );
+        assert_eq!(
+            strip_osc(&format!(
+                "{}XXX{}",
+                format_osc8_hyperlink(HTTP_URL, "This is a link"),
+                format_osc8_hyperlink(HTTP_URL, "This is a link")
+            )),
+            ("This is a linkXXXThis is a link".to_string(), None)
+        );
     }
 
     #[test]
@@ -334,9 +445,9 @@ mod tests {
                 )),
             ),
             (
-                SIMPLE_HYPERLINK,
+                &format_osc8_hyperlink(HTTP_URL, "This is a link"),
                 Some((
-                    "\x1b]8;;http://example.com\x1b\\",
+                    &format!("\x1b]8;;{}\x1b\\", HTTP_URL),
                     "This is a link",
                     "\x1b]8;;\x1b\\",
                 )),
@@ -365,7 +476,14 @@ mod tests {
                     "\x1b]8;;\x1b\\\x1b[0m",
                 )),
             ),
-            (&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK), None),
+            (
+                &format!(
+                    "{}{}",
+                    format_osc8_hyperlink(HTTP_URL, "This is a link"),
+                    format_osc8_hyperlink(HTTP_URL, "This is a link")
+                ),
+                None,
+            ),
             (
                 &format!(
                     "{}{}",
@@ -375,7 +493,10 @@ mod tests {
                 None,
             ),
             (
-                &format!("text before {} text after", SIMPLE_HYPERLINK),
+                &format!(
+                    "text before {} text after",
+                    format_osc8_hyperlink(HTTP_URL, "This is a link")
+                ),
                 None,
             ),
         ] {
@@ -393,29 +514,12 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_ansi_codes_osc_hyperlink() {
-        assert_eq!(strip_ansi_codes(SIMPLE_HYPERLINK), "This is a link",);
-        assert_eq!(strip_ansi_codes(COLORED_HYPERLINK), "src/ansi/mod.rs\n");
-    }
-
-    #[test]
-    fn test_strip_osc_codes_osc_hyperlink() {
+    fn test_strip_ansi_osc_hyperlink() {
         assert_eq!(
-            strip_osc_codes(COLORED_HYPERLINK),
-            "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\n"
+            strip_ansi(&format_osc8_hyperlink(HTTP_URL, "This is a link")),
+            "This is a link",
         );
-        assert_eq!(
-            strip_osc_codes(&format!("{}{}", SIMPLE_HYPERLINK, SIMPLE_HYPERLINK)),
-            "This is a linkThis is a link"
-        );
-        assert_eq!(
-            strip_osc_codes(&format!(
-                "{}{}",
-                COLORED_HYPERLINK.strip_suffix("\n").unwrap(),
-                COLORED_HYPERLINK.strip_suffix("\n").unwrap()
-            )),
-            "\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m\x1b[38;5;4msrc/ansi/mod.rs\x1b[0m"
-        )
+        assert_eq!(strip_ansi(COLORED_HYPERLINK), "src/ansi/mod.rs\n");
     }
 
     #[test]
@@ -428,10 +532,8 @@ mod tests {
 
     #[test]
     fn test_measure_text_width_osc_hyperlink_non_ascii() {
-        assert_eq!(
-            measure_text_width(COLORED_HYPERLINK),
-            measure_text_width("src/ansi/modバー.rs")
-        );
+        assert_eq!(measure_text_width("\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/modバー.rs\x1b]8;;\x1b\\\x1b[0m"),
+                   measure_text_width("src/ansi/modバー.rs"));
     }
 
     #[test]
