@@ -9,9 +9,11 @@ license = "MIT"
 
 [dependencies]
 ansi_term = "0.12.1"
-console = "0.15.0" # TODO: tests only
 itertools = "0.10.3"
 lazy_static = "1.4"
 unicode-segmentation = "1.9.0"
 unicode-width = "0.1.9"
 vte = "0.10.1"
+
+[dev-dependencies]
+console = "0.15.0"
