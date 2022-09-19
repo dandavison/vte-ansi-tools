@@ -3,7 +3,6 @@ mod iterator;
 
 use std::borrow::Cow;
 
-use ansi_term::Style;
 use itertools::Itertools;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -53,7 +52,7 @@ pub fn strip_osc(s: &str) -> (String, Option<String>) {
                 ExpectMoreTextOrTerminator => state = SeenOneHyperlink,
                 _ => state = WillNotReturnUrl,
             },
-            Element::Sgr(_, i, j) => text.push_str(&s[i..j]),
+            Element::Sgr(i, j) => text.push_str(&s[i..j]),
             Element::Csi(i, j) => text.push_str(&s[i..j]),
             Element::Esc(_, _) => {}
             Element::Text(i, j) => {
@@ -113,7 +112,7 @@ pub fn osc_partition(s: &str) -> Option<(&str, &str, &str)> {
                 }
                 text_end = j;
             }
-            Element::Sgr(_, i, j) => match state {
+            Element::Sgr(i, j) => match state {
                 BeforeText(None) => {
                     // Start accumulating some non-OSC content to potentially be prepended to the
                     // returned text section.
@@ -210,31 +209,10 @@ pub fn truncate_str<'a, 'b>(s: &'a str, display_width: usize, tail: &'b str) -> 
     Cow::from(format!("{}{}", result, result_tail))
 }
 
-pub fn parse_style_sections(s: &str) -> Vec<(ansi_term::Style, &str)> {
-    let mut sections = Vec::new();
-    let mut curr_style = Style::default();
-    for element in AnsiElementIterator::new(s) {
-        match element {
-            Element::Text(start, end) => sections.push((curr_style, &s[start..end])),
-            Element::Sgr(style, _, _) => curr_style = style,
-            _ => {}
-        }
-    }
-    sections
-}
-
-// Return the first CSI element, if any, as an `ansi_term::Style`.
-pub fn parse_first_style(s: &str) -> Option<ansi_term::Style> {
-    AnsiElementIterator::new(s).find_map(|el| match el {
-        Element::Sgr(style, _, _) => Some(style),
-        _ => None,
-    })
-}
-
 pub fn string_starts_with_ansi_style_sequence(s: &str) -> bool {
     AnsiElementIterator::new(s)
         .next()
-        .map(|el| matches!(el, Element::Sgr(_, _, _)))
+        .map(|el| matches!(el, Element::Sgr(_, _)))
         .unwrap_or(false)
 }
 
@@ -246,7 +224,7 @@ pub fn ansi_preserving_slice(s: &str, start: usize) -> String {
         .scan(0, |index, element| {
             // `index` is the index in non-ANSI-escape-sequence content.
             Some(match element {
-                Element::Sgr(_, a, b) => &s[a..b],
+                Element::Sgr(a, b) => &s[a..b],
                 Element::Csi(a, b) => &s[a..b],
                 Element::Esc(a, b) => &s[a..b],
                 Element::Osc(a, b) => &s[a..b],
@@ -286,7 +264,7 @@ pub fn ansi_preserving_index(s: &str, i: usize) -> Option<usize> {
 
 fn ansi_strings_iterator(s: &str) -> impl Iterator<Item = (&str, bool)> {
     AnsiElementIterator::new(s).map(move |el| match el {
-        Element::Sgr(_, i, j) => (&s[i..j], true),
+        Element::Sgr(i, j) => (&s[i..j], true),
         Element::Csi(i, j) => (&s[i..j], true),
         Element::Esc(i, j) => (&s[i..j], true),
         Element::Osc(i, j) => (&s[i..j], true),
@@ -534,17 +512,6 @@ mod tests {
     fn test_measure_text_width_osc_hyperlink_non_ascii() {
         assert_eq!(measure_text_width("\x1b[38;5;4m\x1b]8;;file:///Users/dan/src/delta/src/ansi/mod.rs\x1b\\src/ansi/modバー.rs\x1b]8;;\x1b\\\x1b[0m"),
                    measure_text_width("src/ansi/modバー.rs"));
-    }
-
-    #[test]
-    fn test_parse_first_style() {
-        let minus_line_from_unconfigured_git = "\x1b[31m-____\x1b[m\n";
-        let style = parse_first_style(minus_line_from_unconfigured_git);
-        let expected_style = ansi_term::Style {
-            foreground: Some(ansi_term::Color::Red),
-            ..ansi_term::Style::default()
-        };
-        assert_eq!(Some(expected_style), style);
     }
 
     #[test]
